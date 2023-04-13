@@ -1,42 +1,62 @@
 #include "./BST.hpp"
 #include "./vis.hpp"
 
-// #include <chrono>
-// #include <thread>
 #include <random>
+
+/*
+    O código abaixo pode ser usado para inserir valores aleatórios na árvore.
+    Note que apenas as chaves são exibidas, pois os valores são irrelevantes
+    para a organização geral da estrutura.
+*/
 
 using std::cout;
 using std::endl;
+using std::vector;
+
+void add_int_elements(int count, vector<int>& vec, BST<int, int>& bst) {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::uniform_int_distribution<int> distrib(-99, 99);
+    for (int i = 0; i < count; ++i) {
+        try {
+            int value = distrib(gen);
+            vec.push_back(value);
+            bst.insert(value, value);
+        } catch (std::invalid_argument& e) {
+            vec.pop_back();
+            --i;
+        }
+    }
+}
+
+void add_float_elements(int count, vector<float>& vec, BST<float, float>& bst) {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::uniform_real_distribution<float> distrib(-999, 999);
+    for (int i = 0; i < count; ++i) {
+        try {
+            float value = distrib(gen);
+            vec.push_back(value);
+            bst.insert(value, value);
+        } catch (std::invalid_argument& e) {
+            vec.pop_back();
+            --i;
+        }
+    }
+}
 
 int main() {
     BST<int, int> bst;
+    constexpr int n = 24;
+    vector<int> vec;
+    vec.reserve(n);
+    add_int_elements(n / 2, vec, bst);
 
-    /*
-        O código abaixo pode ser usado para inserir valores aleatórios na árvore.
-        Note que apenas as chaves são exibidas, pois os valores são irrelevantes
-        para a organização geral da estrutura.
-    */
-    // const int n = 24;
-    // std::vector<int> vec;
+    // BST<float, float> bst;
+    // constexpr int n = 24;
+    // vector<float> vec;
     // vec.reserve(n);
-    // std::random_device rd;
-    // std::mt19937 gen(rd());
-    // std::uniform_int_distribution<int> distrib(-999, 999);
-    // for (int i = 0; i < n; ++i) {
-    //     try {
-    //         int value = distrib(gen);
-    //         vec.push_back(value);
-    //         bst.insert(value, 0);
-    //     } catch (std::invalid_argument& e) {
-    //         vec.pop_back();
-    //         --i;
-    //     }
-    // }
-    // cout << vec << endl;
-
-    std::vector<int> vec = {520, -309, 950, 685, -50, 296, 348, -393, 807, 474, -974, 817, -267, 198, -540, 954, 769, -946, 243, 604, -167, 672, 461, 508};
-    for (int value : vec) 
-        bst.insert(value, 0);
+    // add_float_elements(n / 2, vec, bst);
 
     // bst.print();
     // bst.print_inorder();
@@ -44,10 +64,13 @@ int main() {
     // bst.print_preorder();
     // bst.print_breadth();
 
-    Visualization<BST<int, int>::Node*> system(bst.get_root(), false, 1280, 720);
+    Visualization<decltype(bst)::Node*> system(bst.get_root(), false, 1280, 720);
+    system.draw(10, true);
 
-    system.draw(30, false);
-    cout << "Done" << endl;
-    // std::cin.get();
+    // add_float_elements(n / 2, vec, bst);
+    add_int_elements(n / 2, vec, bst);
+    
+    system.draw(120, false);
+
     return 0;
 }

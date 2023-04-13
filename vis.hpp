@@ -1,10 +1,17 @@
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
+
 #include <freetype2/ft2build.h>
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
 #include FT_FREETYPE_H
+
+#define GLM_FORCE_INLINE
+#define GLM_FORCE_RADIANS
+#include <glm/ext/vector_float3.hpp>
+#include <glm/ext/vector_float4.hpp>
+#include <glm/ext/matrix_float4x4.hpp>
+#include <glm/ext/matrix_transform.hpp>
+#include <glm/trigonometric.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include <array>
 #include <iostream>
@@ -15,14 +22,17 @@
 
 typedef unsigned int uint;
 
-const int number_of_circle_sides = 90;
+constexpr int number_of_circle_sides = 180;
+
+
 
 /// Namespace que contém informações globais quanto ao funcionamento da janela,
 /// permitindo que eles sejam modificados mesmo por funções estáticas.
 namespace vis {
-    GLFWwindow* window;
+    GLFWwindow* window = nullptr;
     uint width;
     uint height;
+    bool resized = false;
 }
 
 /// Exibe os elementos de um vetor de tipo genérico.
@@ -40,23 +50,26 @@ std::ostream& operator<<(std::ostream& os, std::vector<T>& data) {
     return os;
 }
 
-template<typename T>
+template<typename NodePtr>
 class Visualization {
  public:
     /**
-     * Contrói um objeto de visualização que carrega os dados
-     * necessários para a exibição de uma árvore binária usando OpenGL.
+     * Contrói um objeto de visualização que carrega os dados necessários
+     * para a exibição de uma árvore binária usando OpenGL.
+     * Se fullscreen for verdadeiro, a janela será aberta em tela cheia e
+     * os valores de width e height serão armazenados caso o usuário queira
+     * retornar ao modo janela durante a execução.
      * 
-     * @tparam T Ponteiro para o tipo do nó da árvore.
+     * @tparam NodePtr Ponteiro para o tipo do nó da árvore.
      * @param node Ponteiro para o nó raiz da árvore.
      * @param fullscreen Define se o aplicativo abre em tela cheia.
      * @param width Válido apenas se fullscreen for falso, define a largura da janela.
      * @param height Válido apenas se fullscreen for falso, define a altura da janela.
      * @param path_to_font Caminho até a fonte a ser usada.
      */
-    Visualization(T node, bool fullscreen = false, uint width = 1024,
-    uint height = 768, const std::string& path_to_font = \
-    "dependencies/RobotoMono-Medium.ttf") : root_node(node) {
+    Visualization(NodePtr node, bool fullscreen = false, uint width = 1280,
+    uint height = 720, const std::string& path_to_font = \
+    "dependencies/RobotoMono-Medium.ttf") : root_node(node), width(width), height(height) {
         vis::width = width;
         vis::height = height;
         this->buffer = new char[1024];
@@ -71,54 +84,82 @@ class Visualization {
     }
 
     ~Visualization() {
-        this->reset();
+        if (vis::window) {
+            for (int i = 0; i < 3; ++i) {
+                if (this->shaders[i])
+                    glDeleteProgram(this->shaders[i]);
+            }
+            for (int i = 0; i < 127; ++i) {
+                if (this->glyph_map[i].texture_id)
+                    glDeleteTextures(1, &this->glyph_map[i].texture_id);
+            }
+            if (this->VAO[0])
+                glDeleteVertexArrays(3, this->VAO);
+            if (this->VBO[0])
+                glDeleteBuffers(3, this->VBO);
+            if (glfwGetCurrentContext() == vis::window)
+                destroy_window();
+            vis::window = nullptr;
+            glfwTerminate();
+        }
         delete[] this->buffer;
         delete[] this->glyph_map;
     }
 
-    void set_root(T root) {
+    Visualization(const Visualization&) = delete;
+
+    Visualization& operator=(const Visualization&) = delete;
+
+    /// Define o nó raiz da árvore.
+    void set_root(NodePtr root) {
         this->root_node = root;
     }
 
     /// Redefine o tamanho da janela.
-    static void set_window_size(uint width, uint height) {
-        set_window_size(vis::window, width, height);
+    void set_window_size(uint width, uint height) {
+        this->width = width;
+        this->height = height;
+        if (glfwGetCurrentContext() && glfwGetWindowMonitor(vis::window) == nullptr)
+            set_window_size(vis::window, width, height);
     }
 
     // Redefine o tamanho da janela. Chamada sempre que a janela é redimensionada.
     static void set_window_size(GLFWwindow* window, int width, int height) {
         vis::width = width;
         vis::height = height;
+        vis::resized = true;
         glViewport(0, 0, width, height);
         if (glfwGetCurrentContext()) {
-            glfwSetWindowSize(vis::window, width, height);
+            if (glfwGetWindowMonitor(vis::window) == nullptr)
+                glfwSetWindowSize(vis::window, width, height);
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
-            glfwSwapBuffers(vis::window);
-            glfwPollEvents();
         }
     }
 
     /// Ativa ou desatiava a tela cheia.
-    static void toggle_fullscreen() {
+    void toggle_fullscreen() {
         if (glfwGetCurrentContext()) {
             GLFWmonitor* monitor = glfwGetWindowMonitor(vis::window);
             if (monitor) {
-                glfwSetWindowMonitor(vis::window, nullptr, 0, 0, vis::width, vis::height, 0);
-                glViewport(0, 0, vis::width, vis::height);
+                glfwSetWindowMonitor(vis::window, nullptr, 0, 0, this->width, this->height, 0);
+                set_window_size(vis::window, this->width, this->height);
             } else {
                 monitor = glfwGetPrimaryMonitor();
                 const GLFWvidmode* mode = glfwGetVideoMode(monitor);
                 glfwSetWindowMonitor(vis::window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
                 set_window_size(vis::window, mode->width, mode->height);
             }
+            // Evita redesenhar o conteúdo na janela, pois chamar essa função significa que o
+            // redimensionamento já está sendo tratado
+            vis::resized = false;
         }
     }
 
-    /// Aguarda pelo número especificado de segundos.
+    /// Aguarda pelo valor especificado em segundos.
     static void wait(double seconds) {
         double end_time = glfwGetTime() + seconds;
-        while (glfwGetTime() < end_time) {
+        while (glfwGetTime() < end_time && !glfwWindowShouldClose(vis::window)) {
             continue;
         }
     }
@@ -129,43 +170,99 @@ class Visualization {
      * dinâmica que exibe apenas parte da árvore e pode ser controlada com as
      * setas direcionais ou as teclas WASD.
      * 
-     * @param delay Tempo até a saída automática da função, em segundos.
+     * @param wait_time Tempo até a saída automática da função, em segundos.
      * @param fit_to_screen Define se a visualização é estática ou dinâmica.
      * @return Booleano que indica operação bem sucedida.
      */
-    bool draw(double delay = 0.0, bool fit_to_screen = true) {
-        if (!vis::window) {
-            std::cerr << "Impossível desenhar com janela fechada." << std::endl;
+    bool draw(double wait_time = 0.0, bool fit_to_screen = true) {
+        static bool warned = false;
+        if (vis::window == nullptr) {
+            if (!warned) {
+                std::cerr << "Impossível desenhar com janela fechada." << std::endl;
+                warned = true;
+            }
             return false;
         }
         if (glfwWindowShouldClose(vis::window)) {
-            this->reset();
+            destroy_window();
             return false;
         }
-        if (delay == 0.0) {
-            if (fit_to_screen) delay = 5.0;
-            else delay = 120.0;
+        if (wait_time == 0.0) {
+            if (fit_to_screen)
+                wait_time = 5.0;
+            else
+                wait_time = 120.0;
         }
 
+        // Evita redesenhar a árvore se a janela foi redimensionada fora da execução
+        vis::resized = false;
         log_error();
-        glClearColor(0.85f, 0.85f, 0.85f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
 
-        if (fit_to_screen) {
-            this->draw_tree_static();
-        } else {
-            this->draw_tree_dynamic(delay);
-        }
+        if (fit_to_screen)
+            this->draw_tree_static(wait_time);
+        else
+            this->draw_tree_dynamic(wait_time);
 
-        glfwSwapBuffers(vis::window);
-        glfwPollEvents();
-        if (fit_to_screen) wait(delay);
         log_error();
         return true;
     }
+
+    // Inicializa a biblioteca FreeType para renderizar texto
+    void load_font(const std::string& path_to_font, uint font_height) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        int error;
+        FT_Library library;
+        error = FT_Init_FreeType(&library);
+        if (error) {
+            throw std::runtime_error(
+                "Não foi possível inicializar a biblioteca FreeType. Código do erro " + \
+                std::to_string(error) + ".");
+        }
+        FT_Face face;
+        error = FT_New_Face(library, path_to_font.c_str(), 0, &face);
+        if (error)
+            throw std::runtime_error("Não foi possível carregar fonte.");
+        // Argumentos são font face, comprimento e altura
+        FT_Set_Pixel_Sizes(face, 0, font_height);
+        // FT_Set_Char_Size(face, 0, 16 * 64, vis::width, font_height);
+
+        // Armazena as texturas temporariamente no buffer da classe, antes de
+        // construir as estruturas que vão conter a informação de cada caractere
+        GLuint* textures = reinterpret_cast<GLuint*>(this->buffer);
+        glGenTextures(127, textures);
+        
+        FT_GlyphSlot slot = face->glyph;
+        // Carrega os caracteres ASCII, exceto pelo 127, que é DEL e quebra o programa
+        for (char c = 0; c < 127; ++c) {
+            if (FT_Load_Char(face, c, FT_LOAD_RENDER)) {
+                std::cerr << "Não foi possível carregar o caractere " << c << '.' << std::endl;
+                continue;
+            }
+            glBindTexture(GL_TEXTURE_2D, textures[c]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, slot->bitmap.width,
+                slot->bitmap.rows, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, slot->bitmap.buffer);
+                
+            this->glyph_map[c] = Glyph{textures[c], slot->bitmap.width, slot->bitmap.rows,
+                slot->bitmap_left, slot->bitmap_top, static_cast<int>(slot->advance.x)};
+
+            // Opções são GL_CLAMP_TO_BORDER e GL_CLAMP_TO_EDGE, (s, t, r) == (x, y, z)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+            // Também é possível usar GL_NEAREST
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            // float borderColor[] = { 1.0f, 1.0f, 0.0f, 1.0f };
+            // glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+        }
+        FT_Done_Face(face);
+        FT_Done_FreeType(library);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
  private:
     struct Glyph {
-        uint texture_id;
+        uint texture_id = 0;
         uint width;
         uint height;
         int bearing_x;
@@ -173,19 +270,28 @@ class Visualization {
         int advance;
     };
 
-    T root_node;
+    NodePtr root_node;
     char* buffer;
     Glyph* glyph_map;
     uint shaders[3];
     uint VAO[3];
     uint VBO[3];
+    uint width;
+    uint height;
+    uint FPS;
     bool stride;
 
     enum Shape : uint {
-        Node = 0,
         Line,
-        Text
+        Node,
+        Text,
+        None
     };
+
+    static void destroy_window() {
+        glfwDestroyWindow(vis::window);
+        vis::window = nullptr;
+    }
 
     // Lê um arquivo de shader e compila o código-fonte para uso no programa
     uint compile_shader(GLenum type, Shape shape) {
@@ -216,11 +322,12 @@ class Visualization {
 
         // Armazena o código fonte do shader
         file.read(this->buffer, 1024);
-        this->buffer[file.gcount()] = '\0';
+        GLint length = file.gcount();
+        this->buffer[length] = '\0';
 
         uint id = glCreateShader(type);
-        glShaderSource(id, 1, &this->buffer, nullptr);
-        glCompileShader(id);
+        glShaderSource(id, 1, &this->buffer, &length);
+        glCompileShader(id);    
         log_error(id, GL_COMPILE_STATUS);
         file.close();
         return id;
@@ -242,13 +349,19 @@ class Visualization {
         glDeleteShader(vs);
         glDeleteShader(fs);
         this->shaders[shape] = program;
+
+        glUseProgram(program);
+        glGenVertexArrays(1, &this->VAO[shape]);
+        glGenBuffers(1, &this->VBO[shape]);
+        glBindVertexArray(this->VAO[shape]);
+        glBindBuffer(GL_ARRAY_BUFFER, this->VBO[shape]);
     }
 
     // Cria um círculo de raio 1.0 e centro (0, 0) com o número de lados
     // especificado na constante acima, tudo isso em tempo de compilação.
-    constexpr float* create_circle() {
+    float* create_circle() {
         int index = 0;
-        int n = number_of_circle_sides;
+        constexpr int n = number_of_circle_sides;
         float* circle = new float[n * 2];
         for (float angle = 0; index < n * 2; angle += (glm::two_pi<float>() / n)) {
             circle[index++] = glm::cos(angle);
@@ -257,18 +370,13 @@ class Visualization {
         return circle;
     }
 
-    void  create_line_data() {
+    void create_line_data() {
         this->create_shader_program(Shape::Line);
-        glGenVertexArrays(1, &this->VAO[Shape::Line]);
-        glGenBuffers(1, &this->VBO[Shape::Line]);
-        glBindVertexArray(this->VAO[Shape::Line]);
-        glBindBuffer(GL_ARRAY_BUFFER, this->VBO[Shape::Line]);
-        // Aloca espaço para 1024 floats, que equivale a 512 vértices e 256 linhas
+        // Aloca espaço para 4096 floats, que equivale a 2048 vértices e 1024 linhas
         // que conectam os nós da árvore
-        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 1024, nullptr, GL_DYNAMIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, 4096 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), 0);
-        this->use_program(Shape::Line);
         int line_transform_location = glGetUniformLocation(this->shaders[Shape::Line], "transform");
         float default_transform[4][4] = {
             {1.0f, 0.0f, 0.0f, 0.0f},
@@ -277,29 +385,21 @@ class Visualization {
             {0.0f, 0.0f, 0.0f, 1.0f}
         };
         glUniformMatrix4fv(line_transform_location, 1, GL_FALSE, &default_transform[0][0]);
-        glBindVertexArray(0);
+        this->use_program(Shape::None);
     }
 
     void create_node_data() {
         this->create_shader_program(Shape::Node);
         float* circle = this->create_circle();
-        glGenVertexArrays(1, &this->VAO[Shape::Node]);
-        glGenBuffers(1, &this->VBO[Shape::Node]);
-        glBindVertexArray(this->VAO[Shape::Node]);
-        glBindBuffer(GL_ARRAY_BUFFER, this->VBO[Shape::Node]);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 720, circle, GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, number_of_circle_sides * 2 * sizeof(float), circle, GL_STATIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), 0);
-        glBindVertexArray(0);
-        // delete[] circle;
+        delete[] circle;
+        this->use_program(Shape::None);
     }
 
     void create_text_data() {
         this->create_shader_program(Shape::Text);
-        glGenVertexArrays(1, &this->VAO[Shape::Text]);
-        glGenBuffers(1, &this->VBO[Shape::Text]);
-        glBindVertexArray(this->VAO[Shape::Text]);
-        glBindBuffer(GL_ARRAY_BUFFER, this->VBO[Shape::Text]);
         // Nulo por enquanto, mas os vértices serão atualizados a cada chamada de draw()
         glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 6 * 4, nullptr, GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(0);
@@ -308,7 +408,6 @@ class Visualization {
         glEnableVertexAttribArray(1);
         // Posições das texturas
         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
-        this->use_program(Shape::Text);
         int text_transform_location = glGetUniformLocation(this->shaders[Shape::Text], "transform");
         float default_transform[4][4] = {
             {1.0f, 0.0f, 0.0f, 0.0f},
@@ -317,52 +416,72 @@ class Visualization {
             {0.0f, 0.0f, 0.0f, 1.0f}
         };
         glUniformMatrix4fv(text_transform_location, 1, GL_FALSE, &default_transform[0][0]);
-        glBindVertexArray(0);
+        this->use_program(Shape::None);
     }
 
-    // Inicia a janela na qual serão exibidos os gráficos
+    /// Inicia a janela na qual serão exibidos os gráficos.
     void start(const std::string& path_to_font, bool fullscreen = false) {
         if (!glfwInit())
             throw std::runtime_error("Falha ao inicializar GLFW.");
         try {
-            // Ativa antisserrilhamento
-            glfwWindowHint(GLFW_SAMPLES, 8);
+            // Ativa antisserrilhamento mais pesado (multisampling)
+            glfwWindowHint(GLFW_SAMPLES, 4);
+
             // Cria uma janela e seu contexto OpenGL
-            vis::window = glfwCreateWindow(vis::width, vis::height, "Binary Tree Visualization", nullptr, nullptr);
+            if (fullscreen) {
+                GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+                vis::width = glfwGetVideoMode(monitor)->width;
+                vis::height = glfwGetVideoMode(monitor)->height;
+                vis::window = glfwCreateWindow(vis::width, vis::height,
+                    "Binary Tree Visualization", monitor, nullptr);
+            } else {
+                vis::window = glfwCreateWindow(vis::width, vis::height,
+                    "Binary Tree Visualization", nullptr, nullptr);
+            }
             if (!vis::window)
                 throw std::runtime_error("Falha ao criar janela.");
 
             glfwMakeContextCurrent(vis::window);
-            glViewport(0, 0, vis::width, vis::height);
-            glfwSetFramebufferSizeCallback(vis::window, set_window_size);
             if (glewInit() != GLEW_OK)
                 throw std::runtime_error("Falha ao inicializar GLEW.");
+            glViewport(0, 0, vis::width, vis::height);
+            glfwSetFramebufferSizeCallback(vis::window, set_window_size);
 
+            // Possible values for the hint: GL_FASTEST, GL_NICEST, GL_DONT_CARE
+            glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
             glEnable(GL_BLEND);
             glEnable(GL_CULL_FACE);
+            // Não tenho certeza se é uma boa ideia
+            // glEnable(GL_MULTISAMPLE);
+            glEnable(GL_LINE_SMOOTH);
             glEnable(GL_PROGRAM_POINT_SIZE);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-            if (fullscreen) this->toggle_fullscreen();
-            this->init_freetype(path_to_font,
-                static_cast<uint>(0.05 * std::max(vis::width, vis::height)));
+            this->load_font(path_to_font, 0.05 * std::max(vis::width, vis::height));
             this->create_line_data();
             this->create_node_data();
             this->create_text_data();
             // glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 
         } catch (std::exception& e) {
-            this->reset();
+            // Garante que a janela será destruída adequadamente
+            if (vis::window)
+                destroy_window();
+            // Propaga a exceção novamente, permitindo que o usuário a trate
             throw;
         }
     }
 
     // Estrutura usada para armazenar o ponteiro a um nó e sua posição na tela
     struct NodePos {
-        T node;
+        NodePtr node;
+        // Posição do nó relativa ao centro do tela
         short position;
+        // Índice do nó pai no vetor de nós
         short parent;
+        // Índice do nó filho esquerdo no vetor de nós
         short left_index = 0;
+        // Índice do nó filho direito no vetor de nós
         short right_index = 0;
     };
 
@@ -375,8 +494,8 @@ class Visualization {
         nodes.push_back(NodePos{this->root_node, 0, 0});
         beginnings.push_back(0);
         int index = 0, previous_queue_size = 0, max_distance_from_origin = 0;
-        bool found_min = false;
         while (index < nodes.size()) {
+            // Encontra índice inicial de cada nível (altura) da árvore
             if (index == previous_queue_size) {
                 previous_queue_size = nodes.size();
                 beginnings.push_back(previous_queue_size);
@@ -386,33 +505,45 @@ class Visualization {
                 nodes.push_back(NodePos{nodes[index].node->left(), static_cast<short>(
                     nodes[index].position - 1), static_cast<short>(index)});
 
+                // Se o último nó adicionado colide com o penúltimo, move alguns nós
                 if (nodes[nodes.size() - 2].position == nodes.back().position) {
                     bool should_move = false;
+                    // Avança o último nó para a direita
                     ++nodes.back().position;
+                    // Recua todos os outros nós do mesmo nível para a esquerda
                     for (int i = nodes.size() - 2; i >= beginnings.back(); --i)
                         --nodes[i].position;
                     
                     int current_level = beginnings.size() - 1;
                     int child = nodes.size() - 1;
                     int parent = nodes[child].parent;
-                    while (nodes[parent].left_index == child || should_move) {
-                        if (parent == 0) break;
+                    // Se o pai tem o nó atual como filho esquerdo, atualiza sua posição e dos antecessores
+                    do {
+                        // Não move a raiz, assim ela sempre fica no centro da tela
+                        if (parent == 0)
+                            break;
                         should_move = false;
+                        // Avança o pai do nó atual e todos à sua direita
                         for (int i = parent; i < beginnings[current_level]; ++i) {
                             ++nodes[i].position;
+                            // Se nós foram movidos neste nível, garante que o nível acima sofrerá
+                            // mudanças mesmo que o pai do nó atual tenha ele como filho direito
                             should_move = true;
                         }
                         child = parent;
                         parent = nodes[child].parent;
                         --current_level;
-                    }
+                    } while (shaders);
 
                     current_level = beginnings.size() - 2;
                     child = nodes.size() - 2;
                     parent = nodes[child].parent;
-                    while (nodes[parent].right_index == child || should_move) {
-                        if (parent == 0) break;
+                    // Se o pai tem o nó deslocado para a esquerda como filho direito, atualiza posições
+                    do {
+                        if (parent == 0)
+                            break;
                         should_move = false;
+                        // Recua todos os nós à esquerda do pai do nó afetado
                         for (int i = parent; i >= beginnings[current_level]; --i) {
                             --nodes[i].position;
                             should_move = true;
@@ -420,9 +551,10 @@ class Visualization {
                         child = parent;
                         parent = nodes[child].parent;
                         --current_level;
-                    }
+                    } while (should_move);
                 }
             }
+            // Inserções à direita nunca dão problema, pois são feitas da esqueda para a direita
             if (nodes[index].node->right()) {
                 nodes[index].right_index = nodes.size();
                 nodes.push_back(NodePos{nodes[index].node->right(), static_cast<short>(
@@ -430,23 +562,13 @@ class Visualization {
             }
             ++index;
         }
+        // Se o último nível está completo, um índice inexistente é adicionado,
+        // então ele é removido aqui
         if (beginnings.back() == index)
             beginnings.pop_back();
 
-        // short min_position = 0, max_position = 0;
-        // for (uint i = 0; i < beginnings.size() - 1; ++i) {
-        //     min_position = nodes[beginnings[i]].position;
-        //     max_position = nodes[beginnings[i + 1] - 1].position;
-        //     if (max_position - min_position > greatest_range)
-        //         greatest_range = max_position - min_position;
-        // }
-        // min_position = nodes[beginnings.back()].position;
-        // max_position = nodes[index - 1].position;
-        // if (max_position - min_position > greatest_range)
-        //     greatest_range = max_position - min_position;
-        // return greatest_range;
-
         int distance;
+        // Para cada nível, verifica a distância máxima entre um nó nas extremidades e a origem
         for (uint i = 1; i < beginnings.size(); ++i) {
             distance = std::max(
                 std::abs(nodes[beginnings[i]].position),
@@ -459,48 +581,50 @@ class Visualization {
         if (distance > max_distance_from_origin)
             max_distance_from_origin = distance;
 
-        glClearColor(0.85f, 0.85f, 0.85f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
         return max_distance_from_origin;
     }
 
-    float* organize_data(const float radius_x, const float radius_y, int& j,
+    float* organize_data(const float radius_x, const float radius_y,
         const std::vector<NodePos>& nodes, const std::vector<int>& beginnings) {
         const float line_height = 4.0f * radius_y;
         // Disposição dos dados: 2 floats para a posição inicial da linha, que é
         // o nó pai, e 2 floats para a posição final, que é seu filho.
-        // No pior caso, todo nó que não é folha possui dois filhos, o que torna
-        // necessário alocar 8 floats para cada nó que não esteja no último nível.
-        float* vertices = new float[beginnings.back() * 8];
-        uint current_level = 0;
-        float height;  // altura do nível atual
-        float lower_height = 1.0f - radius_y;  // altura do nível abaixo
-        for (uint i = 0; i < beginnings.back(); ++i) {
-            if (i == beginnings[current_level]) {
+        float* vertices = new float[nodes.size() * 4];
+        int current_level = 1;
+        // Altura do nível acima
+        float upper_height;
+        // Altura do nível atual
+        float height = 0.99f - radius_y;
+        
+        int j = 0;
+        // Os primeiros 4 floats ligam a raiz a si mesma
+        // X do pai
+        vertices[j++] = 0.0f;
+        // Y do pai
+        vertices[j++] = height;
+        // X do filho
+        vertices[j++] = 0.0f;
+        // Y do filho
+        vertices[j++] = height;
+
+        // i: índice do nó atual, que está sendo conectado ao seu pai
+        // j: índice do vetor de dados que está sendo preenchido
+        for (int i = 1; i < nodes.size(); ++i) {
+            if (current_level < beginnings.size() && i == beginnings[current_level]) {
+                upper_height = height;
+                height -= line_height;
                 ++current_level;
-                height = lower_height;
-                lower_height -= line_height;
             }
-            if (nodes[i].node->left()) {
-                vertices[++j] = radius_x * (2 * nodes[i].position);
-                vertices[++j] = height;
-                vertices[++j] = radius_x * (2 * nodes[nodes[i].left_index].position);
-                vertices[++j] = lower_height;
-            }
-            if (nodes[i].node->right()) {
-                vertices[++j] = radius_x * (2 * nodes[i].position);
-                vertices[++j] = height;
-                vertices[++j] = radius_x * (2 * nodes[nodes[i].right_index].position);
-                vertices[++j] = lower_height;
-            }
+            vertices[j++] = radius_x * (2 * nodes[nodes[i].parent].position);
+            vertices[j++] = upper_height;
+            vertices[j++] = radius_x * (2 * nodes[i].position);
+            vertices[j++] = height;
         }
-        this->use_program(Shape::Line);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(float) * ++j, vertices);
         return vertices;
     }
 
-    void draw_tree_static() {
-        glActiveTexture(GL_TEXTURE0);
+    void draw_tree_static(double wait_time) {
+        // glActiveTexture(GL_TEXTURE0);
         std::vector<NodePos> nodes;
         std::vector<int> beginnings;
         int max_distance_from_origin = this->breadth_first_search(nodes, beginnings);
@@ -508,86 +632,141 @@ class Visualization {
         const float max_radius = 0.1f;
         const float ratio = static_cast<float>(vis::width) / vis::height;
         const float inv_ratio = static_cast<float>(vis::height) / vis::width;
-        float radius_x = 0.5f / (static_cast<float>(max_distance_from_origin) + 0.5f);
-        float radius_y = 1.0f / (beginnings.size() * 2 - 1);
+        // Tamanho da tela é 2, então divide por 2 para considerar metade da tela na horizontal
+        // e divide novamente para calcular com raio. Então, divide pela maior distância até a
+        // origem para obter o tamanho ideal, somado a uma constante para ter espaço nas bordas.
+        float radius_x = 0.5f / (0.75f + max_distance_from_origin);
+        // Divide o tamanho da tela pela quantidade de níveis multiplicada por 2, pois cada
+        // nível tem um nó e uma linha de mesmo tamanho. Então, subtrai um para desconsiderar
+        // a existência de uma linha acima da raiz.
+        float radius_y = 0.98f / (2 * beginnings.size() - 1);
         
-        if (radius_x > max_radius) radius_x = max_radius;
-        if (radius_y > max_radius) radius_y = max_radius;
+        if (radius_x > max_radius)
+            radius_x = max_radius;
+        if (radius_y > max_radius)
+            radius_y = max_radius;
 
-        if (radius_y > radius_x * ratio) {
+        if (radius_y > radius_x * ratio)
             radius_y = radius_x * ratio;
-        } else {
+        else
             radius_x = radius_y * inv_ratio;
-        }
 
-        int j = -1;
-        float* vertices = organize_data(radius_x, radius_y, j, nodes, beginnings);
+        // Organiza os dados para serem enviados ao shader
+        float* vertices = organize_data(radius_x, radius_y, nodes, beginnings);
+        int length = nodes.size() * 4;
 
         this->use_program(Shape::Line);
-        glDrawArrays(GL_LINES, 0, j);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(float) * length, vertices);
 
+        // Desenha os nós por cima das linhas, ocultando a parte que ficaria interna
         this->use_program(Shape::Node);
         int transform_location = glGetUniformLocation(this->shaders[Shape::Node], "transform");
         int color_location = glGetUniformLocation(this->shaders[Shape::Node], "rgba");
 
+        // Variáveis que devem ser inicializadas fora da parte do código que pode ser repetida:
+        // Inicializa uma matriz básica de mudança de escala
         float transform[4][4] = {
             {radius_x, 0, 0, 0}, {0, radius_y, 0, 0},
-            {0, 0, 1, 0}, {vertices[0], vertices[1], 0, 1}
+            {0, 0, 1, 0}, {0, 0, 0, 1}
         };
-        glUniformMatrix4fv(transform_location, 1, GL_FALSE, &transform[0][0]);
-        glUniform4f(color_location, 1.0f, 1.0f, 1.0f, 1.0f);
-        glDrawArrays(GL_TRIANGLE_FAN, 0, number_of_circle_sides);
-        glUniform4f(color_location, 0.0f, 0.0f, 0.0f, 1.0f);
-        glDrawArrays(GL_LINE_STRIP, 0, number_of_circle_sides);
+        int j;
+        // Altura da fonte: 0.05 * maior dimensão da tela em pixels
+        // Assim, a escala é 1, que representa metade das coordenadas de -1 a 1
+        // do OpenGL, multiplicada pelo raio do círculo
+        const float scale_x = (1.0f / (std::max(vis::width, vis::height)) * radius_x);
+        const float scale_y = (1.0f / (std::max(vis::width, vis::height)) * radius_y);
+        double start_time = glfwGetTime();
+        double end_time = start_time + wait_time;
+        UserAction action;
+        
+        // Parte que será repetida caso o usuário redimensione a janela
+        render:
+        glClearColor(0.85f, 0.85f, 0.85f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
 
-        for (uint i = 2; i < j; i += 4) {
+        // Desenha as linhas conectando os nós
+        this->use_program(Shape::Line);
+        glDrawArrays(GL_LINES, 0, length);
+
+        this->use_program(Shape::Node);
+        // Desenha os nós
+        for (int i = 2; i < length; i += 4) {
+            // Atualiza a parte de translação da matriz de transformação
             transform[3][0] = vertices[i];
             transform[3][1] = vertices[i + 1];
             glUniformMatrix4fv(transform_location, 1, GL_FALSE, &transform[0][0]);
+            // Desenha o fundo branco do nó
             glUniform4f(color_location, 1.0f, 1.0f, 1.0f, 1.0f);
             glDrawArrays(GL_TRIANGLE_FAN, 0, number_of_circle_sides);
+            // Desenha a borda preta do nó
             glUniform4f(color_location, 0.0f, 0.0f, 0.0f, 1.0f);
             glDrawArrays(GL_LINE_LOOP, 0, number_of_circle_sides);
         }
 
         this->use_program(Shape::Text);
-        // Nota para o eu do futuro: já esqueci, mas acho que é 1.5 porque 2 ficaria
-        // muito grande, mas multiplicado por 10 porque a altura da fonte é 0.1 * tamanho
-        // da maior dimensão da tela
-        const float scale_x = (15.0f / (std::max(vis::width, vis::height)) * radius_x);
-        const float scale_y = (15.0f / (std::max(vis::width, vis::height)) * radius_y);
-        this->draw_text_to(nodes[0].node, vertices[0], vertices[1], scale_x, scale_y);
-        int k = 0;
-        for (uint i = 2; i < j; i += 4) {
-            this->draw_text_to(nodes[++k].node, vertices[i], vertices[i + 1], scale_x, scale_y);
+        j = 0;
+        for (int i = 2; i < length; i += 4) {
+            this->draw_text_from(nodes[j++].node, vertices[i], vertices[i + 1], scale_x, scale_y);
         }
+
+        glfwSwapBuffers(vis::window);
+        glfwPollEvents();
+
+        action = UserAction::Idle;
+        while (glfwGetTime() < end_time && !glfwWindowShouldClose(vis::window)) {
+            if ((action = process_input()) == UserAction::Skip && glfwGetTime() - start_time > 0.5) {
+                return;
+            } else if (action == UserAction::Redraw) {
+                wait(0.1);
+                glfwSwapBuffers(vis::window);
+                goto render;
+            }
+            glfwPollEvents();
+        }
+
         delete[] vertices;
+        this->use_program(Shape::None);
     }
 
-    bool process_input() {
-        if (glfwGetKey(vis::window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-            glfwSetWindowShouldClose(vis::window, true);
-            return false;
+    enum UserAction {
+        Idle,
+        Skip,
+        Move,
+        Wait,
+        Redraw,
+    };
+
+    UserAction process_input() {
+        if (vis::resized) {
+            vis::resized = false;
+            return UserAction::Redraw;
         }
-        if (glfwGetKey(vis::window, GLFW_KEY_SPACE) == GLFW_PRESS) {
-            this->stride = false;
-            return true;
+        if (glfwGetKey(vis::window, GLFW_KEY_ENTER) == GLFW_PRESS ||
+        glfwGetKey(vis::window, GLFW_KEY_KP_ENTER) == GLFW_PRESS) {
+            return UserAction::Skip;
         }
-        return false;
+        if (glfwGetKey(vis::window, GLFW_KEY_ESCAPE) == GLFW_PRESS ||
+        glfwWindowShouldClose(vis::window)) {
+            destroy_window();
+            return UserAction::Skip;
+        }
+        if (glfwGetKey(vis::window, GLFW_KEY_F11) == GLFW_PRESS ||
+        glfwGetKey(vis::window, GLFW_KEY_F) == GLFW_PRESS) {
+            toggle_fullscreen();
+            return UserAction::Redraw;
+        }
+        return UserAction::Idle;
     }
 
-    bool process_input(float* screen) {
-        static float step = 0.03f;
+    UserAction process_input(float* screen) {
+        // Variável persiste entre chamadas da função
+        static float step = 0.01f;
+        if (vis::resized) {
+            vis::resized = false;
+            return UserAction::Redraw;
+        }
         bool pressed = false;
-        if (glfwGetKey(vis::window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-            glfwSetWindowShouldClose(vis::window, true);
-            return pressed;
-        }
-        if (glfwGetKey(vis::window, GLFW_KEY_SPACE) == GLFW_PRESS) {
-            this->stride = !this->stride;
-        }
-        
-        float increment = this->stride ? step * 10 : step;
+        float increment = this->stride ? step * 15 : step;
         if (glfwGetKey(vis::window, GLFW_KEY_UP) == GLFW_PRESS || 
             glfwGetKey(vis::window, GLFW_KEY_W) == GLFW_PRESS) {
             screen[2] += increment; screen[3] += increment;
@@ -606,11 +785,53 @@ class Visualization {
             screen[0] += increment; screen[1] += increment;
             pressed = true;
         }
-        return pressed;
+        if (pressed) {
+            return UserAction::Move;
+        }
+
+        if (glfwGetKey(vis::window, GLFW_KEY_ENTER) == GLFW_PRESS ||
+        glfwGetKey(vis::window, GLFW_KEY_KP_ENTER) == GLFW_PRESS) {
+            return UserAction::Skip;
+        }
+        if (glfwGetKey(vis::window, GLFW_KEY_ESCAPE) == GLFW_PRESS ||
+        glfwWindowShouldClose(vis::window)) {
+            destroy_window();
+            return UserAction::Skip;
+        }
+        if (glfwGetKey(vis::window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+            this->stride = !this->stride;
+            return UserAction::Wait;
+        }
+        if (glfwGetKey(vis::window, GLFW_KEY_F11) == GLFW_PRESS ||
+        glfwGetKey(vis::window, GLFW_KEY_F) == GLFW_PRESS) {
+            toggle_fullscreen();
+            return UserAction::Redraw;
+        }
+        if (glfwGetKey(vis::window, GLFW_KEY_KP_ADD) == GLFW_PRESS) {
+            for (int i = 0; i < 4; ++i)
+                screen[i] /= 1.1f;
+            step /= 1.1f;
+            return UserAction::Redraw;
+        }
+        if (glfwGetKey(vis::window, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS) {
+            for (int i = 0; i < 4; ++i)
+                screen[i] *= 1.1f;
+            step *= 1.1f;
+            return UserAction::Redraw;
+        }
+        if (glfwGetKey(vis::window, GLFW_KEY_R) == GLFW_PRESS || 
+        glfwGetKey(vis::window, GLFW_KEY_HOME) == GLFW_PRESS ||
+        glfwGetKey(vis::window, GLFW_KEY_BACKSPACE) == GLFW_PRESS) {
+            for (int i = 0; i < 4; ++i)
+                screen[i] = i % 2 == 0 ? -1.0f : 1.0f;
+            step = 0.01f;
+            return UserAction::Redraw;
+        }
+        return UserAction::Idle;
     }
 
-    void draw_tree_dynamic(double time) {
-        glActiveTexture(GL_TEXTURE0);
+    void draw_tree_dynamic(double wait_time) {
+        // glActiveTexture(GL_TEXTURE0);
         std::vector<NodePos> nodes;
         std::vector<int> beginnings;
         int max_distance_from_origin = this->breadth_first_search(nodes, beginnings);
@@ -618,18 +839,19 @@ class Visualization {
         const float inv_ratio = static_cast<float>(vis::height) / vis::width;
         const float radius_y = 0.1f;
         const float radius_x = radius_y * inv_ratio;
-        const float line_height = 4.0f * radius_y;
-        const float scale_x = (15.0f / (std::max(vis::width, vis::height)) * radius_x);
-        const float scale_y = (15.0f / (std::max(vis::width, vis::height)) * radius_y);
+        const float line_height = radius_y * 4;
+        const float scale_x = (1.0f / (std::max(vis::width, vis::height)) * radius_x);
+        const float scale_y = (1.0f / (std::max(vis::width, vis::height)) * radius_y);
 
-        int j = -1;
-        float* vertices = organize_data(radius_x, radius_y, j, nodes, beginnings);
+        float* vertices = organize_data(radius_x, radius_y, nodes, beginnings);
+        int length = nodes.size() * 4;
 
         glm::mat4 basic_transform(1.0f);
         glm::mat4 transform(1.0f);
         float screen[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
 
         this->use_program(Shape::Line);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(float) * length, vertices);
         int line_transform_location = glGetUniformLocation(this->shaders[Shape::Line], "transform");
         this->use_program(Shape::Node);
         int node_transform_location = glGetUniformLocation(this->shaders[Shape::Node], "transform");
@@ -637,11 +859,17 @@ class Visualization {
         this->use_program(Shape::Text);
         int text_transform_location = glGetUniformLocation(this->shaders[Shape::Text], "transform");
 
-        double end_time = glfwGetTime() + time;
+        double start_time = glfwGetTime();
+        double end_time = start_time + wait_time;
+        double fps_start = start_time - 0.5;
+        double now;
+        uint frames = 0;
+        std::string fps;
+        UserAction action = UserAction::Idle;
         goto render;
         while (glfwGetTime() < end_time && !glfwWindowShouldClose(vis::window)) {
             glfwPollEvents();
-            if (process_input(screen)) {
+            if ((action = process_input(screen)) == UserAction::Move) {
                 render:
                 basic_transform = glm::ortho(screen[0], screen[1], screen[2], screen[3]);
                 
@@ -651,22 +879,14 @@ class Visualization {
                 this->use_program(Shape::Line);
                 glUniformMatrix4fv(line_transform_location, 1, GL_FALSE,
                     glm::value_ptr(basic_transform));
-                glDrawArrays(GL_LINES, 0, j);
+                glDrawArrays(GL_LINES, 0, length);
 
                 this->use_program(Shape::Node);
-                transform = glm::translate(basic_transform,
-                    glm::vec3(vertices[0], vertices[1], 0.0f));
-                transform = glm::scale(transform, glm::vec3(radius_x, radius_y, 1.0f));
-                glUniformMatrix4fv(node_transform_location, 1, GL_FALSE, glm::value_ptr(transform));
-                glUniform4f(node_color_location, 1.0f, 1.0f, 1.0f, 1.0f);
-                glDrawArrays(GL_TRIANGLE_FAN, 0, number_of_circle_sides);
-                glUniform4f(node_color_location, 0.0f, 0.0f, 0.0f, 1.0f);
-                glDrawArrays(GL_LINE_LOOP, 0, number_of_circle_sides);
-
-                for (uint i = 2; i < j; i += 4) {
+                for (int i = 2; i < length; i += 4) {
                     transform = glm::translate(basic_transform,
                         glm::vec3(vertices[i], vertices[i + 1], 0.0f));
                     transform = glm::scale(transform, glm::vec3(radius_x, radius_y, 1.0f));
+
                     glUniformMatrix4fv(node_transform_location, 1, GL_FALSE, glm::value_ptr(transform));
                     glUniform4f(node_color_location, 1.0f, 1.0f, 1.0f, 1.0f);
                     glDrawArrays(GL_TRIANGLE_FAN, 0, number_of_circle_sides);
@@ -677,53 +897,55 @@ class Visualization {
                 this->use_program(Shape::Text);
                 glUniformMatrix4fv(text_transform_location, 1, GL_FALSE,
                     glm::value_ptr(basic_transform));
-                this->draw_text_to(nodes[0].node, vertices[0], vertices[1], scale_x, scale_y);
-                int k = 0;
-                for (uint i = 2; i < j; i += 4) {
-                    this->draw_text_to(nodes[++k].node, vertices[i], vertices[i + 1], scale_x, scale_y);
+                int j = 0;
+                for (int i = 2; i < length; i += 4) {
+                    this->draw_text_from(nodes[j++].node, vertices[i], vertices[i + 1], scale_x, scale_y);
                 }
 
+                ++frames;
+                // Computa o FPS a cada 0.5 segundos
+                if ((now = glfwGetTime()) - fps_start >= 0.5) {
+                    this->FPS = fps.empty() ? 0 : frames * 2;
+                    frames = 0;
+                    fps_start = now;
+                    fps = std::to_string(this->FPS);
+                }
+                glm::mat4 identity(1.0f);
+                glUniformMatrix4fv(text_transform_location, 1, GL_FALSE,
+                    glm::value_ptr(identity));
+
+                // Desenha o FPS na tela
+                this->draw_text_from(fps, -0.99f, 0.0f, scale_x / 2, scale_y / 2, false, true);
+
+                this->use_program(Shape::None);
                 glfwSwapBuffers(vis::window);
-                glfwPollEvents();
 
                 if (this->stride) {
-                    double wait_time = glfwGetTime() + 0.25;
-                    if (wait_time > end_time) wait_time = end_time;
-                    while (glfwGetTime() < wait_time && !glfwWindowShouldClose(vis::window)) {
-                        glfwPollEvents();
-                        if (process_input()) {
-                            break;
-                        }
-                    }
+                    wait(0.5);
+                    glfwPollEvents();
                 }
+            // Se a ação é ativar o stride ou redesenhar a tela, como em caso de
+            // redimensionamento, espera por 0.1 segundo
+            } else if (action >= UserAction::Wait) {
+                wait(0.1);
+                if (action == UserAction::Redraw) {
+                    glfwSwapBuffers(vis::window);
+                    goto render;
+                }
+            // Se a ação é sair, garante que ela apenas ocorra pelo menos 0.5 segundos após o início da execução
+            } else if (action == UserAction::Skip && glfwGetTime() - start_time > 0.5) {
+                break;
             }
         }
         delete[] vertices;
     }
 
-    void draw_text_to(const T node, float x, float y, const float scale_x, const float scale_y) {
-        // Lê no máximo 4 caracteres, ninguém debuga com mais que isso
-        char key[4];
-        std::stringstream ss;
-        ss << node->key();
-        ss.read(key, 4);
+    void draw_text(const std::string& key, float x, float y, float scale_x, float scale_y) {
         std::array<float, 24> vertices;
-
-        float length = 0;
-        float height = 0;
-        for (int i = 0; i < ss.gcount(); ++i) {
-            length += (this->glyph_map[key[i]].advance >> 6) * scale_x;
-            float candidate = this->glyph_map[key[i]].height * scale_y;
-            if (candidate > height) height = candidate;
-        }
-        // Centraliza na coordenada passada para a função
-        x -= length * 0.5f;
-        y -= height * 0.5f;
-
-        for (int i = 0; i < ss.gcount(); ++i) {
-            Glyph* glyph = this->glyph_map + key[i];
+        for (char c : key) {
+            Glyph* glyph = this->glyph_map + c;
             float xpos = x + glyph->bearing_x * scale_x;
-            float ypos = y - (glyph->height - glyph->bearing_y) * scale_y;
+            float ypos = y - (static_cast<int>(glyph->height) - glyph->bearing_y) * scale_y;
 
             float w = glyph->width * scale_x;
             float h = glyph->height * scale_y;
@@ -744,23 +966,63 @@ class Visualization {
             // Equivale a `x = x + (advance / 64) * scale_x`
             x += (glyph->advance >> 6) * scale_x;
         }
-        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    void draw_text_from(const NodePtr node, float x, float y, float scale_x, float scale_y) {
+        std::stringstream ss;
+        ss << node->key();
+        std::string key(ss.str());
+        this->draw_text_from(key, x, y, scale_x, scale_y);
+    }
+
+    void draw_text_from(const std::string& text, float x, float y,
+                        float scale_x, float scale_y, bool centered = true, bool y_top = false) {
+        // Escala é multiplicada por uma constante de adequação, que é um pixel na unidade
+        // usada pela biblioteca dividida pelo máximo entre a extensão da chave e 3, para
+        // que os a chave não fique muito grande
+        float factor = (64 / std::max(text.size(), 3UL));
+        scale_x *= factor;
+        scale_y *= factor;
+
+        // Centraliza na coordenada passada para a função
+        if (centered || y_top) {
+            float length = 0;
+            float height = 0;
+            // Calcula a extensão total do texto para centralizar em x e obtém a maior altura
+            for (char c : text) {
+                length += (this->glyph_map[c].advance >> 6);
+                float candidate = this->glyph_map[c].height;
+                if (candidate > height)
+                    height = candidate;
+            }
+            // Deixa o texto próximo da parte superior da tela
+            if (y_top) {
+                y = 0.99f - height * scale_y;
+            // Centraliza nas coordenadas passadas para a função
+            } else {
+                x -= length * 0.5f * scale_x;
+                y -= height * 0.5f * scale_y;
+            }
+        }
+        this->draw_text(text, x, y, scale_x, scale_y);
     }
 
     // Exibe quaisquer erros recentes do OpenGL
-    static void log_error() {
+    static void log_error(int num = 0) {
         GLenum error = glGetError();
         while (error != GL_NO_ERROR) {
+            if (num > 0)
+                std::cerr << num << ": ";
             switch (error) {
-                case GL_INVALID_ENUM:      std::cout << "Invalid enum"; break;
-                case GL_INVALID_VALUE:     std::cout << "Invalid value"; break;
-                case GL_INVALID_OPERATION: std::cout << "Invalid operation"; break;
-                case GL_STACK_OVERFLOW:    std::cout << "Stack overflow"; break;
-                case GL_STACK_UNDERFLOW:   std::cout << "Stack underflow"; break;
-                case GL_OUT_OF_MEMORY:     std::cout << "Out of memory"; break;
-                default:                   std::cout << "Unknown error" << std::endl;
+                case GL_INVALID_ENUM:      std::cerr << "Invalid enum"; break;
+                case GL_INVALID_VALUE:     std::cerr << "Invalid value"; break;
+                case GL_INVALID_OPERATION: std::cerr << "Invalid operation"; break;
+                case GL_STACK_OVERFLOW:    std::cerr << "Stack overflow"; break;
+                case GL_STACK_UNDERFLOW:   std::cerr << "Stack underflow"; break;
+                case GL_OUT_OF_MEMORY:     std::cerr << "Out of memory"; break;
+                default:                   std::cerr << "Unknown error";
             }
-            std::cout << std::endl;
+            std::cerr << std::endl;
             error = glGetError();
         }
     }
@@ -783,115 +1045,21 @@ class Visualization {
         }
         return;
         error:
-            this->reset();
-            std::cout << this->buffer;
+            destroy_window();
+            std::cerr << this->buffer;
             throw std::runtime_error("Explodiu!");
     }
 
-    // Inicializa a biblioteca FreeType para renderizar texto
-    void init_freetype(const std::string& path_to_font, uint font_height) {
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        int error;
-        FT_Library library;
-        error = FT_Init_FreeType(&library);
-        if (error) {
-            throw std::runtime_error(
-                "Não foi possível inicializar a biblioteca FreeType. Código do erro " + \
-                std::to_string(error) + ".");
-        }
-        FT_Face face;
-        error = FT_New_Face(library, path_to_font.c_str(), 0, &face);
-        if (error)
-            throw std::runtime_error("Não foi possível carregar fonte.");
-        // Argumentos são font face, comprimento e altura
-        FT_Set_Pixel_Sizes(face, 0, font_height);
-        // FT_Set_Char_Size(face, 0, constexpr 16 * 64, vis::width, font_height);
-
-        // Armazena as texturas temporariamente no buffer da classe, antes de
-        // construir as estruturas que vão conter a informação de cada caractere
-        uint* textures = reinterpret_cast<uint*>(this->buffer);
-
-        glGenTextures(127, textures);
-        
-        uint height;
-        FT_GlyphSlot slot = face->glyph;
-        // Carrega os caracteres ASCII, exceto pelo 127, que é DEL e quebra o programa
-        for (char c = 0; c < 127; ++c) {
-            if (FT_Load_Char(face, c, FT_LOAD_RENDER)) {
-                std::cout << "Não foi possível carregar o caractere " << c << '.' << std::endl;
-                continue;
-            }
-            glBindTexture(GL_TEXTURE_2D, textures[c]);
-            // Parece que a biblioteca não lida bem com hífen, então tive que fazer manualmente
-            if (c == '-') {
-                // Obtém o tamanho de um caractere cujo tamanho é igual ao de um algarismo
-                height = this->glyph_map['&'].height;
-                // Descobre o tamanho do buffer de dados do caractere '-'
-                int size = slot->bitmap.width * height;
-                unsigned char* buffer = new unsigned char[size];
-                int i = 0;
-                // Preenche de espaço vazio até o começo da cópia dos verdadeiros dados
-                int start_copy = ((height - slot->bitmap.rows) * slot->bitmap.width) / 2;
-                for (i = 0; i < start_copy; ++i)
-                    buffer[i] = '\0';
-
-                // Copia as informações do caractere segundo sua fonte
-                int n_copies = slot->bitmap.rows * slot->bitmap.width;
-                std::copy(slot->bitmap.buffer, slot->bitmap.buffer + n_copies, buffer + i);
-                i += n_copies;
-
-                // Preenche o restante com nada
-                for (; i < size; ++i)
-                    buffer[i] = '\0';
-
-                // Gera a textura usando os dados "customizados"
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, slot->bitmap.width,
-                    height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, buffer);
-
-                delete[] buffer;
-            } else {
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, slot->bitmap.width,
-                    slot->bitmap.rows, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, slot->bitmap.buffer);
-            }
-
-            // Um cara aleatório recomendou GL_CLAMP_TO_BORDER, (s, t, r) == (x, y, z)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-            // Também é possível usar GL_NEAREST
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            // float borderColor[] = { 1.0f, 1.0f, 0.0f, 1.0f };
-            // glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
-
-            this->glyph_map[c] = Glyph{textures[c], slot->bitmap.width, slot->bitmap.rows,
-                slot->bitmap_left, slot->bitmap_top, static_cast<int>(slot->advance.x)};
-        }
-
-        // Atualiza os dados do hífen
-        this->glyph_map['-'].height = height;
-        this->glyph_map['-'].bearing_y = height;
-        
-        FT_Done_Face(face);
-        FT_Done_FreeType(library);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
-
     void use_program(Shape shape) {
-        glUseProgram(this->shaders[shape]);
-        glBindVertexArray(this->VAO[shape]);
-        glBindBuffer(GL_ARRAY_BUFFER, this->VBO[shape]);
-    }
-
-    void reset() {
-        if (glfwGetCurrentContext()) {
-            for (int i = 0; i < 3; ++i) {
-                this->shaders[i] = 0;
-                this->VAO[i] = 0;
-                this->VBO[i] = 0;
-            }
-            vis::window = nullptr;
-            glfwTerminate();
+        if (shape == Shape::None) {
+            glUseProgram(0);
+            glBindVertexArray(0);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        } else {
+            glUseProgram(this->shaders[shape]);
+            glBindVertexArray(this->VAO[shape]);
+            glBindBuffer(GL_ARRAY_BUFFER, this->VBO[shape]);
         }
     }
 };
